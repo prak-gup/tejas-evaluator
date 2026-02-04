@@ -12,8 +12,8 @@ const countWords = (str) => {
 
 // Markdown Output Component (Simple)
 const MarkdownOutput = ({ content }) => {
-  // Basic rendering - just wrapping in div for now, reliance on pre-wrap
-  return <div>{content}</div>;
+  // Use padding and pre-wrap to ensure structure is visible
+  return <div className="whitespace-pre-wrap font-mono text-sm">{content}</div>;
 };
 
 
@@ -296,9 +296,9 @@ function App() {
 
 
 
-  if (!session) {
-    return <Login />
-  }
+  // if (!session) {
+  //   return <Login />
+  // }
 
   return (
     <div className="relative min-h-screen bg-primary text-text-primary font-sans transition-colors duration-300 selection:bg-accent/30 overflow-hidden">
@@ -338,12 +338,17 @@ function App() {
             </div>
             <button
               onClick={() => {
-                console.log('Sign out clicked (bypass mode)');
-                setSession(null);
+                const confirmReset = window.confirm('Reset current session data?');
+                if (confirmReset) {
+                  setInputs({});
+                  setOutputs({});
+                  setMetrics({});
+                  // setSession(null); // DO NOT NULLIFY SESSION
+                }
               }}
               className="text-sm font-medium text-text-secondary hover:text-text-primary transition-colors"
             >
-              Sign Out
+              Reset App
             </button>
           </div>
         </div>

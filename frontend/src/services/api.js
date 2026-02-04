@@ -45,11 +45,13 @@ export const callOpenRouter = async (model, messages, apiKey, targetWordCount = 
             const data = await response.json();
             console.log(`[API] Data received, length: ${data.choices?.[0]?.message?.content?.length}`);
 
-            // 1. PROGRAMMATIC CLEANUP: Remove ** and # BEFORE checking word count
-            let cleanedContent = data.choices[0].message.content
-                .replace(/\*\*(.*?)\*\*/g, '$1') // Remove bold
-                .replace(/^#+\s+/gm, '')          // Remove headers (# Title)
-                .replace(/`/g, '');               // Remove code ticks
+            // 1. PROGRAMMATIC CLEANUP: (DISABLED) - We want strict adherence to structure
+            // let cleanedContent = data.choices[0].message.content
+            //     .replace(/\*\*(.*?)\*\*/g, '$1') // Remove bold
+            //     .replace(/^#+\s+/gm, '')          // Remove headers (# Title)
+            //     .replace(/`/g, '');               // Remove code ticks
+
+            let cleanedContent = data.choices[0].message.content; // Keep raw formatting
 
             lastContent = cleanedContent;
 
