@@ -11,9 +11,15 @@ const countWords = (str) => {
 };
 
 // Markdown Output Component (Simple)
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+
 const MarkdownOutput = ({ content }) => {
-  // Use padding and pre-wrap to ensure structure is visible
-  return <div className="whitespace-pre-wrap font-mono text-sm">{content}</div>;
+  return (
+    <div className="prose prose-sm max-w-none dark:prose-invert">
+      <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
+    </div>
+  );
 };
 
 
