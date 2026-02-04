@@ -30,8 +30,12 @@ export default function Login() {
 
         try {
             if (isForgotPassword) {
+                // Determine redirect URL: Use env var, or production URL if on localhost, otherwise origin
+                const productionUrl = 'https://tejas-evaluator.netlify.app';
+                const redirectBase = import.meta.env.VITE_APP_URL || (window.location.hostname === 'localhost' ? productionUrl : window.location.origin);
+
                 const { error } = await supabase.auth.resetPasswordForEmail(email, {
-                    redirectTo: window.location.origin, // Redirect back to app
+                    redirectTo: `${redirectBase}/login`,
                 });
                 if (error) throw error;
                 setMessage({ type: 'success', text: 'Password reset link sent to your email!' });
