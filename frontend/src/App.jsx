@@ -1,9 +1,9 @@
 import { useState, useEffect } from 'react'
-import { supabase } from './supabaseClient'
+import { supabase, logGeneration, logFeedback } from './supabaseClient'
 import Login from './components/Login'
 import { callOpenRouter } from './services/api'
 import { PROMPTS } from './data/prompts'
-import { Play, RotateCcw, Save, Trash2, Clock, AlignLeft, Info, CheckCircle2, ChevronDown, ChevronRight, Sun, Moon, Loader2, Copy, Check } from 'lucide-react'
+import { Play, RotateCcw, Save, Trash2, Clock, AlignLeft, Info, CheckCircle2, ChevronDown, ChevronRight, Sun, Moon, Loader2, Copy, Check, ThumbsUp, ThumbsDown } from 'lucide-react'
 
 // Convert array to object for easy lookup
 const availablePrompts = PROMPTS.reduce((acc, prompt) => {
@@ -44,6 +44,8 @@ function App() {
   const [availableModels, setAvailableModels] = useState([]);
   const [saveStatus, setSaveStatus] = useState({});
   const [copyStatus, setCopyStatus] = useState({});
+  const [dbIds, setDbIds] = useState({}); // { [modelId]: 'uuid' }
+  const [feedbackMap, setFeedbackMap] = useState({}); // { [modelId]: 'like' | 'dislike' | null }
 
   const handleCopy = async (text, modelId) => {
     if (!text) return;
@@ -56,7 +58,19 @@ function App() {
     } catch (err) {
       console.error('Failed to copy code', err);
     }
-  }; // Track save status per card
+  };
+
+  const handleFeedback = async (modelId, type) => {
+    // Optimistic UI update
+    setFeedbackMap(prev => ({ ...prev, [modelId]: type }));
+
+    const id = dbIds[modelId];
+    if (id) {
+      await logFeedback(id, type);
+    } else {
+      console.warn('No DB ID found for model:', modelId);
+    }
+  };
   const [expandedCards, setExpandedCards] = useState({}); // { [modelId]: boolean }
   const [theme, setTheme] = useState(localStorage.getItem('theme') || 'dark'); // Default to dark
 
@@ -249,17 +263,10 @@ function App() {
 
       // SUPABASE LOGGING
       try {
-        const { error } = await supabase.from('evaluation_logs').insert({
-          user_id: session.user.id !== 'local-user' ? session.user.id : null,
-          query: inputs['text_input'] || JSON.stringify(inputs),
-          model: modelId,
-          time_taken: duration,
-          iterations: attempts,
-          target_words: inputs['word_count'] ? parseInt(inputs['word_count']) : null,
-          output_words: wordCount,
-          output_text: resultText
-        });
-        if (error) console.error('[App] Supabase log error:', error);
+        const id = await logGeneration(modelId, inputs, resultText);
+        if (id) {
+          setDbIds(prev => ({ ...prev, [modelId]: id }));
+        }
       } catch (logErr) {
         console.error('[App] Logging failed:', logErr);
       }
@@ -570,6 +577,37 @@ function App() {
                       </button>
                     </>
                   )}
+
+                  {/* Feedback Buttons */}
+                  <div className="w-[1px] h-6 bg-border mx-1 self-center" />
+
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleFeedback(modelId, 'like');
+                    }}
+                    className={`p-2 rounded-lg transition-colors ${feedbackMap[modelId] === 'like'
+                      ? 'bg-success/10 text-success'
+                      : 'bg-secondary text-text-tertiary hover:bg-success/10 hover:text-success'
+                      }`}
+                    title="Good Response"
+                  >
+                    <ThumbsUp className={`w-4 h-4 ${feedbackMap[modelId] === 'like' ? 'fill-current' : ''}`} />
+                  </button>
+
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleFeedback(modelId, 'dislike');
+                    }}
+                    className={`p-2 rounded-lg transition-colors ${feedbackMap[modelId] === 'dislike'
+                      ? 'bg-destructive/10 text-destructive'
+                      : 'bg-secondary text-text-tertiary hover:bg-destructive/10 hover:text-destructive'
+                      }`}
+                    title="Bad Response"
+                  >
+                    <ThumbsDown className={`w-4 h-4 ${feedbackMap[modelId] === 'dislike' ? 'fill-current' : ''}`} />
+                  </button>
 
                 </div>
               </div>
