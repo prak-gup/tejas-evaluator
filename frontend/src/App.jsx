@@ -2,8 +2,14 @@ import { useState, useEffect } from 'react'
 import { supabase } from './supabaseClient'
 import Login from './components/Login'
 import { callOpenRouter } from './services/api'
-import { availablePrompts } from './data/prompts'
-import { Play, RotateCcw, Save, Trash2, Clock, AlignLeft, Info, CheckCircle2, ChevronDown, ChevronRight, Sun, Moon, Loader2 } from 'lucide-react'
+import { PROMPTS } from './data/prompts'
+import { Play, RotateCcw, Save, Trash2, Clock, AlignLeft, Info, CheckCircle2, ChevronDown, ChevronRight, Sun, Moon, Loader2, Copy, Check } from 'lucide-react'
+
+// Convert array to object for easy lookup
+const availablePrompts = PROMPTS.reduce((acc, prompt) => {
+  acc[prompt.id] = prompt;
+  return acc;
+}, {});
 
 // Simple helper to count words properly for Hindi/English mixed text
 const countWords = (str) => {
@@ -36,7 +42,21 @@ function App() {
   const [loading, setLoading] = useState({});
   const [metrics, setMetrics] = useState({});
   const [availableModels, setAvailableModels] = useState([]);
-  const [saveStatus, setSaveStatus] = useState({}); // Track save status per card
+  const [saveStatus, setSaveStatus] = useState({});
+  const [copyStatus, setCopyStatus] = useState({});
+
+  const handleCopy = async (text, modelId) => {
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopyStatus(prev => ({ ...prev, [modelId]: 'copied' }));
+      setTimeout(() => {
+        setCopyStatus(prev => ({ ...prev, [modelId]: null }));
+      }, 2000);
+    } catch (err) {
+      console.error('Failed to copy code', err);
+    }
+  }; // Track save status per card
   const [expandedCards, setExpandedCards] = useState({}); // { [modelId]: boolean }
   const [theme, setTheme] = useState(localStorage.getItem('theme') || 'dark'); // Default to dark
 
@@ -164,7 +184,8 @@ function App() {
       // Validate inputs
       const visibleInputs = currentPrompt.inputs || [];
       const missingInputs = visibleInputs.filter(f => {
-        return !inputs[f.name] && inputs[f.name] !== 0;
+        const isOptional = f.label.toLowerCase().includes('(optional)') || f.optional;
+        return !isOptional && !inputs[f.name] && inputs[f.name] !== 0;
       });
 
       if (missingInputs.length > 0) {
@@ -518,22 +539,38 @@ function App() {
                     </div>
                   )}
 
-                  {/* SAVE BUTTON */}
                   {outputs[modelId] && (
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        saveOutput(modelId);
-                      }}
-                      className={`p-2 rounded-lg transition-colors ${saveStatus[modelId] === 'saved'
-                        ? 'bg-success/10 text-success hover:bg-success/20'
-                        : 'bg-secondary text-text-tertiary hover:bg-accent/10 hover:text-accent'
-                        }`}
-                      title="Save as Best Output"
-                    >
-                      {saveStatus[modelId] === 'saved' ? <CheckCircle2 className="w-4 h-4" /> : <Save className="w-4 h-4" />}
-                    </button>
+                    <>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          // Get raw text from output. If it's markdown, we copy the raw markdown.
+                          handleCopy(outputs[modelId], modelId);
+                        }}
+                        className={`p-2 rounded-lg transition-colors ${copyStatus[modelId] === 'copied'
+                          ? 'bg-success/10 text-success hover:bg-success/20'
+                          : 'bg-secondary text-text-tertiary hover:bg-accent/10 hover:text-accent'
+                          }`}
+                        title="Copy to Clipboard"
+                      >
+                        {copyStatus[modelId] === 'copied' ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+                      </button>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          saveOutput(modelId);
+                        }}
+                        className={`p-2 rounded-lg transition-colors ${saveStatus[modelId] === 'saved'
+                          ? 'bg-success/10 text-success hover:bg-success/20'
+                          : 'bg-secondary text-text-tertiary hover:bg-accent/10 hover:text-accent'
+                          }`}
+                        title="Save as Best Output"
+                      >
+                        {saveStatus[modelId] === 'saved' ? <CheckCircle2 className="w-4 h-4" /> : <Save className="w-4 h-4" />}
+                      </button>
+                    </>
                   )}
+
                 </div>
               </div>
 

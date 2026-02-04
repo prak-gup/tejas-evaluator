@@ -45,13 +45,13 @@ export const callOpenRouter = async (model, messages, apiKey, targetWordCount = 
             const data = await response.json();
             console.log(`[API] Data received, length: ${data.choices?.[0]?.message?.content?.length}`);
 
-            // 1. PROGRAMMATIC CLEANUP: (DISABLED) - We want strict adherence to structure
-            // let cleanedContent = data.choices[0].message.content
-            //     .replace(/\*\*(.*?)\*\*/g, '$1') // Remove bold
-            //     .replace(/^#+\s+/gm, '')          // Remove headers (# Title)
-            //     .replace(/`/g, '');               // Remove code ticks
-
-            let cleanedContent = data.choices[0].message.content; // Keep raw formatting
+            // 1. PROGRAMMATIC CLEANUP:
+            // Remove ONLY leading/trailing code fences (```markdown etc) to allow ReactMarkdown to render the content properly.
+            // We DO NOT remove bold/headers anymore.
+            let cleanedContent = data.choices[0].message.content
+                .replace(/^```[a-z]*\s*/i, '') // Remove start fence
+                .replace(/```$/, '')            // Remove end fence
+                .trim();
 
             lastContent = cleanedContent;
 
@@ -59,14 +59,19 @@ export const callOpenRouter = async (model, messages, apiKey, targetWordCount = 
                 return { content: lastContent, attempts: 1 };
             }
 
-            const wordCount = lastContent.trim().split(/\s+/).filter(w => w.length > 0).length;
-            const target = parseInt(targetWordCount);
+            // Extract numeric target handles "300 (Brief)" -> 300
+            const target = parseInt(targetWordCount.toString().replace(/\D/g, ''));
 
-            // Skip validation if target matches parsing error or is 0
+            // Validation skipped if valid target not found
             if (isNaN(target) || target <= 0) return { content: lastContent, attempts: 1 };
 
+            // Count words in the response
+            const wordCount = lastContent.trim().split(/\s+/).filter(w => w.length > 0).length;
             const diff = Math.abs(wordCount - target);
-            const threshold = Math.max(5, target * 0.10); // 5 words or 10% tolerance
+
+            // Tolerance: 10% or 15 words, whichever is larger. 
+            // For 100 words, +/- 15 words (85-115). For 500 words, +/- 50 words (450-550).
+            const threshold = Math.max(15, target * 0.10);
 
             if (diff <= threshold) {
                 return { content: lastContent, attempts: attempts + 1 };
@@ -74,25 +79,24 @@ export const callOpenRouter = async (model, messages, apiKey, targetWordCount = 
 
             console.log(`Word count mismatch (Attempt ${attempts + 1}): Got ${wordCount}, Target ${target}. Retrying...`);
 
-            // CONSTRUCT SMART RETRY PROMPT
-            const diffRatio = wordCount / target;
+            // CONSTRUCT SMART RETRY PROMPT (SENTENCE-BASED)
+            // We align specifically with the prompt's internal logic (approx 15-20 words/sentence).
             const targetSentences = Math.ceil(target / 15);
-            // const hasSubheadings = /\*\*|##/.test(lastContent); // Cleanup removed these, so we check original or just force layout
 
             let retryInstruction = "";
 
-            if (target < 250) {
-                // SPECIAL CASE: Small targets often get bloated. FORCE single paragraph.
-                // "Nuclear" option for short texts
-                const keepSentences = Math.max(3, Math.floor(target / 20));
-                retryInstruction = `STRICT SYSTEM ALERT: Your output (${wordCount} words) is CRITICALLY OVER the limit of ${target} words. \n\nEMERGENCY TRUNCATION REQUIRED:\n1. DISCARD the previous draft.\n2. Write EXACTLY ${keepSentences} to ${keepSentences + 2} sentences.\n3. NO "Introduction" or "Conclusion". Just the core news.\n4. ABSOLUTE MAXIMUM LENGTH: ${target + 15} words.`;
-            } else if (diffRatio > 1.5) {
-                // Case 1: Grossly oversized -> Force Summarization
-                retryInstruction = `STRICT SYSTEM ALERT: Your previous output was ${wordCount} words. This is DRASTICALLY longer than the ${target} word limit. You must SUMMARIZE AGGRESSIVELY. Remove all fluff. Aim for exactly ${targetSentences} sentences (approx 15 words/sentence).`;
+            if (target < 200) {
+                // For small targets, we just re-state the sentence limit gently, avoiding "Nuclear" truncation which destroys formatting.
+                retryInstruction = `STRICT LENGTH CHECK: Your response (` + wordCount + ` words) is too far from the target (` + target + ` words). \n\nPlease rewrite to be CLOSER to ` + target + ` words. \nFocus on compliance: aim for exactly ` + targetSentences + ` sentences.`;
+            } else if (wordCount > target * 1.5) {
+                // Grossly oversized
+                retryInstruction = `STRICT SYSTEM ALERT: Your output (` + wordCount + ` words) is WAY too long (Target: ` + target + `). \n\nSUMMARIZE AGGRESSIVELY. Cut introductions/conclusions. \nAim for exactly ` + targetSentences + ` sentences.`;
             } else if (wordCount > target) {
-                retryInstruction = `STRICT SYSTEM ALERT: Your output was ${wordCount} words. You need to be closer to ${target} words. Reduce length by ${wordCount - target} words. Aim for exactly ${targetSentences} sentences.`;
+                // Slightly oversized
+                retryInstruction = `Word count check: You are over by ` + (wordCount - target) + ` words. Please trim lightly to reach approx ` + target + ` words.`;
             } else {
-                retryInstruction = `STRICT SYSTEM ALERT: Your output was ${wordCount} words. You need to be closer to ${target} words. Increase length by ${target - wordCount} words. Aim for exactly ${targetSentences} sentences.`;
+                // Undersized
+                retryInstruction = `Word count check: You are under by ` + (target - wordCount) + ` words. Please expand slightly to reach approx ` + target + ` words. Add a bit more detail to the subheadings.`;
             }
 
             currentMessages.push({ role: "assistant", content: lastContent });
