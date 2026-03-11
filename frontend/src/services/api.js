@@ -114,3 +114,32 @@ export const callOpenRouter = async (model, messages, apiKey, targetWordCount = 
     }
     return { content: lastContent, attempts: attempts };
 };
+
+export const callBackendAPI = async (endpoint, payload, apiKey) => {
+    console.log(`[API] calling Backend: ${endpoint}`);
+    try {
+        const headers = {
+            "Content-Type": "application/json"
+        };
+        if (apiKey) {
+            headers["Authorization"] = `Bearer ${apiKey}`;
+        }
+
+        const response = await fetch(`http://localhost:8000${endpoint}`, {
+            method: "POST",
+            headers: headers,
+            body: JSON.stringify(payload)
+        });
+
+        if (!response.ok) {
+            const errorText = await response.text();
+            throw new Error(`Backend Error: ${response.status} - ${errorText}`);
+        }
+
+        const data = await response.json();
+        return data; // Returns the full object { article_markdown, validation, etc. }
+    } catch (error) {
+        console.error(`[API] Backend call failed:`, error);
+        throw error;
+    }
+};

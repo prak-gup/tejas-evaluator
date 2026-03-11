@@ -1,7 +1,7 @@
-import { useState, useEffect } from 'react'
+import React, { useState, useEffect } from 'react'
 import { supabase, logGeneration, logFeedback } from './supabaseClient'
 import Login from './components/Login'
-import { callOpenRouter } from './services/api'
+import { callOpenRouter, callBackendAPI } from './services/api'
 import { PROMPTS } from './data/prompts'
 import { Play, RotateCcw, Save, Trash2, Clock, AlignLeft, Info, CheckCircle2, ChevronDown, ChevronRight, Sun, Moon, Loader2, Copy, Check, ThumbsUp, ThumbsDown } from 'lucide-react'
 
@@ -29,13 +29,52 @@ const MarkdownOutput = ({ content }) => {
 };
 
 
+class ErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false, error: null, errorInfo: null };
+  }
+
+  static getDerivedStateFromError(error) {
+    return { hasError: true };
+  }
+
+  componentDidCatch(error, errorInfo) {
+    this.setState({ error, errorInfo });
+    console.error("Uncaught error:", error, errorInfo);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="min-h-screen bg-black text-red-500 p-10 font-mono overflow-auto">
+          <h1 className="text-2xl font-bold mb-4">CRITICAL RENDER ERROR</h1>
+          <div className="bg-gray-900 p-4 rounded border border-red-900 mb-4">
+            <h2 className="text-xl mb-2">{this.state.error?.toString()}</h2>
+            <pre className="whitespace-pre-wrap text-sm text-gray-400">
+              {this.state.errorInfo?.componentStack}
+            </pre>
+          </div>
+          <button
+            className="px-4 py-2 bg-red-600 text-white rounded hover:bg-red-700"
+            onClick={() => window.location.reload()}
+          >
+            Reload Page
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 function App() {
   const [session, setSession] = useState({ user: { id: 'local-user' } }); // DUMMY SESSION
   const [activePromptId, setActivePromptId] = useState(Object.keys(availablePrompts)[0]);
   const [apiKey, setApiKey] = useState(localStorage.getItem('openRouterKey') || '');
 
   // 1. UPDATE DEFAULT STATE: Removed legacy model explicitly
-  const [selectedModels, setSelectedModels] = useState(['google/gemini-2.5-flash-lite', 'meta-llama/llama-3.1-70b-instruct']);
+  const [selectedModels, setSelectedModels] = useState(['google/gemini-2.5-flash', 'google/gemini-3.1-flash-lite-preview']);
 
   const [inputs, setInputs] = useState({});
   const [outputs, setOutputs] = useState({});
@@ -96,17 +135,14 @@ function App() {
     if (apiKey) localStorage.setItem('openRouterKey', apiKey);
 
     const curatedModels = [
-      { id: 'meta-llama/llama-3.1-70b-instruct', name: 'Meta: Llama 3.1 70B' },
-      { id: 'qwen/qwen-2.5-72b-instruct', name: 'Qwen: Qwen 2.5 72B' },
-      { id: 'qwen/qwen3-32b', name: 'Qwen: Qwen 3 32B (New)' },
-      { id: 'openai/gpt-oss-120b', name: 'OpenAI: GPT-OSS 120B' },
-      { id: 'google/gemini-2.5-flash-lite', name: 'Google: Gemini 2.5 Flash Lite' }
+      { id: 'google/gemini-2.5-flash', name: 'Google: Gemini 2.5 Flash' },
+      { id: 'google/gemini-3.1-flash-lite-preview', name: 'Google: Gemini 3.1 Flash Lite' }
     ];
 
     setAvailableModels(curatedModels);
 
     // 2. FORCE CLEANUP: validate selected models against available list
-    setSelectedModels(prev => prev.filter(id => curatedModels.find(m => m.id === id) || id === 'qwen/qwen3-32b'));
+    setSelectedModels(prev => prev.filter(id => curatedModels.find(m => m.id === id)));
   }, [apiKey]);
 
   // Initialize expanded state when models are selected
@@ -150,8 +186,8 @@ function App() {
   }, [activePromptId]);
 
 
-  const currentPrompt = availablePrompts[activePromptId];
-  const inputFields = currentPrompt.inputs;
+  const currentPrompt = availablePrompts[activePromptId] || {};
+  const inputFields = currentPrompt.inputs || [];
 
 
   const handleInputChange = (key, value) => {
@@ -207,6 +243,66 @@ function App() {
         throw new Error(`Missing inputs: ${missingNames}`);
       }
 
+      // 1. BACKEND API PATH
+      if (currentPrompt.backendEndpoint) {
+        console.log(`[App] Switching to Backend API: ${currentPrompt.backendEndpoint}`);
+
+        if (!inputs['text']) throw new Error("Please enter Press Release Text");
+
+        const payload = {
+          text: inputs['text'],
+          target_words: parseInt(inputs['target_words']) || 250
+        };
+
+        const responseData = await callBackendAPI(currentPrompt.backendEndpoint, payload, apiKey);
+
+        // Format Output
+        let resultText = responseData.article_markdown || "";
+
+        // Append Execution Stats if available
+        if (responseData.stats && responseData.stats.agents) {
+          resultText += `\n\n---\n### ⚡ Execution Stats\n`;
+          const statsTable = responseData.stats.agents.map(a => `- **${a.name}**: ${a.model} (${a.time.toFixed(2)}s)`).join('\n');
+          resultText += statsTable;
+        }
+
+        // Append Validation Report
+        if (responseData.validation) {
+          const symbol = responseData.validation.passed ? "✅" : "⚠️";
+          resultText += `\n\n---\n### Validation Report ${symbol}\n`;
+          if (responseData.validation.issues && responseData.validation.issues.length > 0) {
+            resultText += responseData.validation.issues.map(i => `- ${i}`).join('\n');
+          } else {
+            resultText += "All checks passed.";
+          }
+        }
+
+        // Update State
+        const endTime = performance.now();
+        const duration = ((endTime - startTime) / 1000).toFixed(2);
+        const wordCount = countWords(responseData.article_markdown || "");
+
+        // Use backend stats for accurate "attempts" or logic if provided
+        const attempts = responseData.stats ? responseData.stats.agents.filter(a => a.name === "WriterAgent").length : 1;
+
+        setOutputs(prev => ({ ...prev, [modelId]: resultText }));
+        setMetrics(prev => ({
+          ...prev,
+          [modelId]: { time: duration, words: wordCount, attempts: attempts }
+        }));
+        setSaveStatus(prev => ({ ...prev, [modelId]: null }));
+        setLoading(prev => ({ ...prev, [modelId]: false }));
+
+        // Log to Supabase (Optional, maybe backend handles it? For now let's log frontend side for consistency if possible)
+        try {
+          const id = await logGeneration(modelId, inputs, resultText);
+          if (id) setDbIds(prev => ({ ...prev, [modelId]: id }));
+        } catch (logErr) { console.error('[App] Logging failed:', logErr); }
+
+        return; // EXIT FUNCTION
+      }
+
+      // 2. OPENROUTER PATH (Legacy)
       // Prepare messages
       let messages = [
         { role: "system", content: currentPrompt.system || "You are a helpful AI assistant." }
@@ -314,7 +410,8 @@ function App() {
   };
 
   const handleRunAll = () => {
-    if (!apiKey) {
+    // Allow execution if we have an API Key OR if we are using a backend endpoint
+    if (!apiKey && !currentPrompt?.backendEndpoint) {
       alert("Please enter your OpenRouter API Key first.");
       return;
     }
@@ -323,9 +420,14 @@ function App() {
     setMetrics({});
     setSaveStatus({});
 
-    selectedModels.forEach((modelId) => {
-      runRequest(modelId);
-    });
+    if (currentPrompt?.backendEndpoint) {
+      // For backend endpoints, use the endpoint itself as the ID
+      runRequest(currentPrompt.backendEndpoint);
+    } else {
+      selectedModels.forEach((modelId) => {
+        runRequest(modelId);
+      });
+    }
   };
 
 
@@ -335,307 +437,379 @@ function App() {
   // }
 
   return (
-    <div className="relative min-h-screen bg-primary text-text-primary font-sans transition-colors duration-300 selection:bg-accent/30 overflow-hidden">
-      {/* Dynamic Aurora Background */}
-      <div className="fixed top-[-10%] left-[-10%] w-[500px] h-[500px] bg-accent/10 rounded-full blur-[120px] animate-pulse pointer-events-none" />
-      <div className="fixed bottom-[-10%] right-[-10%] w-[500px] h-[500px] bg-accent/10 rounded-full blur-[120px] animate-pulse pointer-events-none" />
+    <ErrorBoundary>
+      <div className="relative min-h-screen bg-primary text-text-primary font-sans transition-colors duration-300 selection:bg-accent/30 overflow-hidden">
+        {/* Dynamic Aurora Background */}
+        <div className="fixed top-[-10%] left-[-10%] w-[500px] h-[500px] bg-accent/10 rounded-full blur-[120px] animate-pulse pointer-events-none" />
+        <div className="fixed bottom-[-10%] right-[-10%] w-[500px] h-[500px] bg-accent/10 rounded-full blur-[120px] animate-pulse pointer-events-none" />
 
-      {/* Header */}
-      <header className="fixed top-0 w-full z-50 bg-card/80 backdrop-blur-xl border-b border-border transition-colors duration-300">
-        <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
-          <div className="flex items-center space-x-3">
-            <div className="w-8 h-8 rounded-xl bg-gradient-to-tr from-accent to-accent-hover flex items-center justify-center shadow-lg shadow-accent/20">
-              <Play className="w-4 h-4 text-white fill-current" />
-            </div>
-            <span className="text-lg font-bold tracking-tight text-text-primary">
-              Tejas Prompt Evaluator
-            </span>
-          </div>
-
-          <div className="flex items-center gap-4">
-            {/* Theme Toggle */}
-            <button
-              onClick={toggleTheme}
-              className="p-2 rounded-full bg-secondary border border-border text-text-secondary hover:text-accent transition-all"
-            >
-              {theme === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
-            </button>
-
-            <div className="relative group">
-              <input
-                type="password"
-                value={apiKey}
-                onChange={(e) => setApiKey(e.target.value)}
-                placeholder="OpenRouter API Key"
-                className="bg-input border border-border rounded-full px-4 py-1.5 text-sm w-48 focus:w-64 transition-all outline-none focus:border-accent/50 focus:ring-1 focus:ring-accent/50 text-text-primary placeholder:text-text-tertiary"
-              />
-            </div>
-            <button
-              onClick={() => {
-                const confirmReset = window.confirm('Reset current session data?');
-                if (confirmReset) {
-                  setInputs({});
-                  setOutputs({});
-                  setMetrics({});
-                  // setSession(null); // DO NOT NULLIFY SESSION
-                }
-              }}
-              className="text-sm font-medium text-text-secondary hover:text-text-primary transition-colors"
-            >
-              Reset App
-            </button>
-          </div>
-        </div>
-      </header>
-      <main className="max-w-7xl mx-auto px-6 pt-24 pb-12 grid grid-cols-12 gap-8">
-        {/* LEFT SIDEBAR - CONTROLS */}
-        <div className="col-span-12 lg:col-span-4 space-y-6">
-
-          {/* TABBED PROMPT SELECTOR - FIXED WIDTH */}
-          <div className="max-w-full w-full">
-            <div className="bg-card backdrop-blur-xl border border-border p-1.5 rounded-2xl shadow-xl flex gap-1 overflow-x-auto custom-scrollbar transition-colors duration-300">
-              {Object.entries(availablePrompts).map(([id, prompt]) => (
-                <button
-                  key={id}
-                  onClick={() => setActivePromptId(id)}
-                  className={`flex-1 min-w-fit px-4 py-2.5 rounded-xl text-sm font-medium whitespace-nowrap transition-all ${activePromptId === id
-                    ? 'bg-violet-600 text-white border border-violet-600 shadow-md shadow-violet-500/20'
-                    : 'text-text-secondary hover:text-text-primary hover:bg-secondary'
-                    }`}
-                >
-                  {prompt.name}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {/* Input Fields */}
-          <div className="bg-card backdrop-blur-xl border border-border p-5 rounded-2xl shadow-xl space-y-4 hover:shadow-2xl transition-all duration-300">
-            <h2 className="text-sm font-semibold text-text-tertiary uppercase tracking-wider mb-2">Inputs</h2>
-            {inputFields.map(field => (
-              <div key={field.name} className="space-y-1.5">
-                <label className="text-xs font-medium text-text-secondary ml-1">{field.label}</label>
-                {field.type === 'textarea' ? (
-                  <textarea
-                    className="w-full bg-input border border-border rounded-xl px-4 py-3 text-sm text-text-primary placeholder:text-text-tertiary focus:outline-none focus:ring-2 focus:ring-accent/50 min-h-[150px] resize-y transition-all"
-                    placeholder={field.placeholder}
-                    value={inputs[field.name] || ''}
-                    onChange={(e) => handleInputChange(field.name, e.target.value)}
-                  />
-                ) : field.name === 'current_date' ? (
-                  // NATIVE DATE PICKER
-                  <input
-                    type="date"
-                    className="w-full bg-input border border-border rounded-xl px-4 py-3 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent/50 transition-all [color-scheme:dark] data-[theme=light]:[color-scheme:light]"
-                    value={inputs[field.name] || ''}
-                    onChange={(e) => handleInputChange(field.name, e.target.value)}
-                  />
-                ) : field.type === 'select' ? (
-                  <select
-                    className="w-full bg-input border border-border rounded-xl px-4 py-3 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent/50 transition-all"
-                    value={inputs[field.name] || ''}
-                    onChange={(e) => handleInputChange(field.name, e.target.value)}
-                  >
-                    <option value="" disabled>Select {field.label}</option>
-                    {field.options.map(opt => (
-                      <option key={opt.value} value={opt.value}>{opt.label}</option>
-                    ))}
-                  </select>
-                ) : (
-                  <input
-                    type={field.type}
-                    className="w-full bg-input border border-border rounded-xl px-4 py-3 text-sm text-text-primary placeholder:text-text-tertiary focus:outline-none focus:ring-2 focus:ring-accent/50 transition-all"
-                    placeholder={field.placeholder}
-                    value={inputs[field.name] || ''}
-                    onChange={(e) => handleInputChange(field.name, e.target.value)}
-                  />
-                )}
+        {/* Header */}
+        <header className="fixed top-0 w-full z-50 bg-card/80 backdrop-blur-xl border-b border-border transition-colors duration-300">
+          <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
+            <div className="flex items-center space-x-3">
+              <div className="w-8 h-8 rounded-xl bg-gradient-to-tr from-accent to-accent-hover flex items-center justify-center shadow-lg shadow-accent/20">
+                <Play className="w-4 h-4 text-white fill-current" />
               </div>
-            ))}
-          </div>
+              <span className="text-lg font-bold tracking-tight text-text-primary">
+                Tejas Prompt Evaluator
+              </span>
+            </div>
 
-          {/* Model Selector - IMPROVED VISIBILITY + Global Expand/Collapse */}
-          <div className="bg-card backdrop-blur-xl border border-border p-5 rounded-2xl shadow-xl hover:shadow-2xl transition-all duration-300">
-            <div className="flex items-center justify-between mb-4">
-              <div className="flex items-center gap-2">
-                <h2 className="text-sm font-semibold text-text-tertiary uppercase tracking-wider">Models</h2>
-                <span className="text-xs text-text-secondary bg-secondary px-2 py-0.5 rounded-full">{selectedModels.length} selected</span>
-              </div>
-
-              {/* GLOBAL EXPAND/COLLAPSE BUTTON */}
+            <div className="flex items-center gap-4">
+              {/* Theme Toggle */}
               <button
-                onClick={toggleAllCards}
-                className="text-xs font-medium text-accent hover:text-accent-hover transition-colors flex items-center gap-1"
-                title="Toggle all results"
+                onClick={toggleTheme}
+                className="p-2 rounded-full bg-secondary border border-border text-text-secondary hover:text-accent transition-all"
               >
-                {selectedModels.every(id => expandedCards[id]) ? 'Collapse All' : 'Expand All'}
+                {theme === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
+              </button>
+
+              <div className="relative group">
+                <input
+                  type="password"
+                  value={apiKey}
+                  onChange={(e) => setApiKey(e.target.value)}
+                  placeholder="OpenRouter API Key"
+                  className="bg-input border border-border rounded-full px-4 py-1.5 text-sm w-48 focus:w-64 transition-all outline-none focus:border-accent/50 focus:ring-1 focus:ring-accent/50 text-text-primary placeholder:text-text-tertiary"
+                />
+              </div>
+              <button
+                onClick={() => {
+                  const confirmReset = window.confirm('Reset current session data?');
+                  if (confirmReset) {
+                    setInputs({});
+                    setOutputs({});
+                    setMetrics({});
+                    // setSession(null); // DO NOT NULLIFY SESSION
+                  }
+                }}
+                className="text-sm font-medium text-text-secondary hover:text-text-primary transition-colors"
+              >
+                Reset App
+              </button>
+            </div>
+          </div>
+        </header>
+        <main className="max-w-7xl mx-auto px-6 pt-24 pb-12 grid grid-cols-12 gap-8">
+          {/* LEFT SIDEBAR - CONTROLS */}
+          <div className="col-span-12 lg:col-span-4 space-y-6">
+
+            {/* TOP LEVEL NAVIGATION */}
+            <div className="flex bg-card backdrop-blur-xl border border-border p-1.5 rounded-2xl shadow-xl mb-6">
+              <button
+                onClick={() => {
+                  setActivePromptId('pr-to-news'); // Default to first item
+                }}
+                className={`flex-1 px-4 py-3 rounded-xl text-sm font-bold transition-all ${activePromptId !== 'pr-to-news-text'
+                  ? 'bg-violet-600 text-white shadow-lg shadow-violet-500/20'
+                  : 'text-text-secondary hover:text-text-primary hover:bg-secondary'
+                  }`}
+              >
+                Home
+              </button>
+              <button
+                onClick={() => setActivePromptId('pr-to-news-text')}
+                className={`flex-1 px-4 py-3 rounded-xl text-sm font-bold transition-all ${activePromptId === 'pr-to-news-text'
+                  ? 'bg-violet-600 text-white shadow-lg shadow-violet-500/20'
+                  : 'text-text-secondary hover:text-text-primary hover:bg-secondary'
+                  }`}
+              >
+                PR → News (Text Only)
               </button>
             </div>
 
-            <div className="flex flex-wrap gap-2">
-              {availableModels.map(model => (
-                <button
-                  key={model.id}
-                  onClick={() => toggleModel(model.id)}
-                  title={selectedModels.includes(model.id) ? "Click to Deselect" : "Click to Select"}
-                  className={`px-4 py-2 rounded-full text-xs font-bold border-2 transition-all transform duration-200 ${selectedModels.includes(model.id)
-                    ? 'bg-violet-600 text-white border-violet-600 shadow-lg shadow-violet-500/30 scale-105' // Active: Explicit high contrast colors
-                    : 'bg-input text-text-secondary border-border hover:border-accent hover:text-accent hover:scale-105' // Inactive: Hover effect
-                    }`}
-                >
-                  <span className="flex items-center gap-2">
-                    {selectedModels.includes(model.id) && <CheckCircle2 className="w-3 h-3" />}
-                    {model.name}
-                  </span>
-                </button>
+            {/* SECONDARY NAVIGATION (Only for Home Tab) */}
+            {activePromptId !== 'pr-to-news-text' && (
+              <div className="max-w-full w-full">
+                <div className="bg-card backdrop-blur-xl border border-border p-1.5 rounded-2xl shadow-xl flex gap-1 overflow-x-auto custom-scrollbar transition-colors duration-300">
+                  {Object.entries(availablePrompts)
+                    .filter(([id]) => id !== 'pr-to-news-text')
+                    .map(([id, prompt]) => (
+                      <button
+                        key={id}
+                        onClick={() => setActivePromptId(id)}
+                        className={`flex-1 min-w-fit px-4 py-2.5 rounded-xl text-sm font-medium whitespace-nowrap transition-all ${activePromptId === id
+                          ? 'bg-secondary text-accent border border-accent/20 shadow-sm'
+                          : 'text-text-secondary hover:text-text-primary hover:bg-secondary'
+                          }`}
+                      >
+                        {prompt.name}
+                      </button>
+                    ))}
+                </div>
+              </div>
+            )}
+
+            {/* Input Fields */}
+            <div className="bg-card backdrop-blur-xl border border-border p-5 rounded-2xl shadow-xl space-y-4 hover:shadow-2xl transition-all duration-300">
+              <h2 className="text-sm font-semibold text-text-tertiary uppercase tracking-wider mb-2">Inputs</h2>
+              {inputFields.map(field => (
+                <div key={field.name} className="space-y-1.5">
+                  <label className="text-xs font-medium text-text-secondary ml-1">{field.label}</label>
+                  {field.type === 'textarea' ? (
+                    <textarea
+                      className="w-full bg-input border border-border rounded-xl px-4 py-3 text-sm text-text-primary placeholder:text-text-tertiary focus:outline-none focus:ring-2 focus:ring-accent/50 min-h-[150px] resize-y transition-all"
+                      placeholder={field.placeholder}
+                      value={inputs[field.name] || ''}
+                      onChange={(e) => handleInputChange(field.name, e.target.value)}
+                    />
+                  ) : field.name === 'current_date' ? (
+                    // NATIVE DATE PICKER
+                    <input
+                      type="date"
+                      className="w-full bg-input border border-border rounded-xl px-4 py-3 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent/50 transition-all [color-scheme:dark] data-[theme=light]:[color-scheme:light]"
+                      value={inputs[field.name] || ''}
+                      onChange={(e) => handleInputChange(field.name, e.target.value)}
+                    />
+                  ) : field.type === 'select' ? (
+                    <select
+                      className="w-full bg-input border border-border rounded-xl px-4 py-3 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent/50 transition-all"
+                      value={inputs[field.name] || ''}
+                      onChange={(e) => handleInputChange(field.name, e.target.value)}
+                    >
+                      <option value="" disabled>Select {field.label}</option>
+                      {field.options?.map(opt => (
+                        <option key={opt.value} value={opt.value}>{opt.label}</option>
+                      ))}
+                    </select>
+                  ) : (
+                    <input
+                      type={field.type}
+                      className="w-full bg-input border border-border rounded-xl px-4 py-3 text-sm text-text-primary placeholder:text-text-tertiary focus:outline-none focus:ring-2 focus:ring-accent/50 transition-all"
+                      placeholder={field.placeholder}
+                      value={inputs[field.name] || ''}
+                      onChange={(e) => handleInputChange(field.name, e.target.value)}
+                    />
+                  )}
+                </div>
               ))}
             </div>
+
+            {/* Model Selector - Only show if NO backendEndpoint */}
+            {!currentPrompt?.backendEndpoint && (
+              <div className="bg-card backdrop-blur-xl border border-border p-5 rounded-2xl shadow-xl hover:shadow-2xl transition-all duration-300">
+                <div className="flex items-center justify-between mb-4">
+                  <div className="flex items-center gap-2">
+                    <h2 className="text-sm font-semibold text-text-tertiary uppercase tracking-wider">Models</h2>
+                    <span className="text-xs text-text-secondary bg-secondary px-2 py-0.5 rounded-full">{selectedModels.length} selected</span>
+                  </div>
+
+                  {/* GLOBAL EXPAND/COLLAPSE BUTTON */}
+                  <button
+                    onClick={toggleAllCards}
+                    className="text-xs font-medium text-accent hover:text-accent-hover transition-colors flex items-center gap-1"
+                    title="Toggle all results"
+                  >
+                    {selectedModels.every(id => expandedCards[id]) ? 'Collapse All' : 'Expand All'}
+                  </button>
+                </div>
+
+                <div className="flex flex-wrap gap-2">
+                  {availableModels.map(model => (
+                    <button
+                      key={model.id}
+                      onClick={() => toggleModel(model.id)}
+                      title={selectedModels.includes(model.id) ? "Click to Deselect" : "Click to Select"}
+                      className={`px-4 py-2 rounded-full text-xs font-bold border-2 transition-all transform duration-200 ${selectedModels.includes(model.id)
+                        ? 'bg-violet-600 text-white border-violet-600 shadow-lg shadow-violet-500/30 scale-105' // Active: Explicit high contrast colors
+                        : 'bg-input text-text-secondary border-border hover:border-accent hover:text-accent hover:scale-105' // Inactive: Hover effect
+                        }`}
+                    >
+                      <span className="flex items-center gap-2">
+                        {selectedModels.includes(model.id) && <CheckCircle2 className="w-3 h-3" />}
+                        {model.name}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <button
+              onClick={handleRunAll}
+              disabled={Object.values(loading).some(Boolean) || (!apiKey && !currentPrompt?.backendEndpoint)}
+              // FIXED: Use standard Violet-600 color to guarantee visibility in light mode
+              className="w-full bg-violet-600 hover:bg-violet-700 text-white font-bold py-4 rounded-xl shadow-lg shadow-violet-500/20 transition-all transform hover:scale-[1.02] disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 group"
+            >
+              <Play className="w-5 h-5 fill-current group-hover:scale-110 transition-transform" />
+              <span className="tracking-wide">RUN EVALUATION</span>
+            </button>
+
           </div>
 
-          <button
-            onClick={handleRunAll}
-            disabled={Object.values(loading).some(Boolean) || !apiKey}
-            // FIXED: Use standard Violet-600 color to guarantee visibility in light mode
-            className="w-full bg-violet-600 hover:bg-violet-700 text-white font-bold py-4 rounded-xl shadow-lg shadow-violet-500/20 transition-all transform hover:scale-[1.02] disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 group"
-          >
-            <Play className="w-5 h-5 fill-current group-hover:scale-110 transition-transform" />
-            <span className="tracking-wide">RUN EVALUATION</span>
-          </button>
+          {/* RIGHT MAIN Content - RESULTS */}
+          <div className="col-span-12 lg:col-span-8 space-y-4">
 
-        </div>
+            {/* Custom View for Backend Endpoint (PR to News Text Only) */}
+            {currentPrompt?.backendEndpoint && loading[currentPrompt.backendEndpoint] && (
+              <div className="bg-card backdrop-blur-xl border border-border rounded-2xl p-12 flex flex-col items-center justify-center space-y-4 shadow-2xl animate-pulse">
+                <div className="relative w-16 h-16">
+                  <div className="absolute inset-0 bg-violet-600/20 rounded-full animate-ping"></div>
+                  <div className="relative bg-violet-600 rounded-full p-4 animate-spin">
+                    <Loader2 className="w-8 h-8 text-white" />
+                  </div>
+                </div>
+                <h3 className="text-xl font-bold text-text-primary">Generating Article...</h3>
+                <p className="text-sm text-text-tertiary">Running multi-agent pipeline: RuleAgent → Parenting → WriterAgent</p>
+              </div>
+            )}
 
-        {/* RIGHT MAIN Content - RESULTS */}
-        <div className="col-span-12 lg:col-span-8 space-y-4">
-          {selectedModels.map((modelId) => (
-            <div key={modelId} className="bg-card backdrop-blur-xl border border-border rounded-2xl overflow-hidden shadow-2xl transition-all duration-300">
-              {/* Card Header (Click to Toggle) */}
-              <div
-                className="px-6 py-4 border-b border-border bg-secondary/30 flex items-center justify-between cursor-pointer hover:bg-secondary/50 transition-colors group"
-                onClick={() => toggleCard(modelId)}
-              >
-                <div className="flex items-center gap-3">
-                  <div className={`p-2 rounded-lg transition-all ${expandedCards[modelId] ? 'bg-accent/10 ring-1 ring-accent/50' : 'bg-input ring-1 ring-border'}`}>
-                    {expandedCards[modelId] ? (
-                      <ChevronDown className="w-4 h-4 text-accent" />
+            {currentPrompt?.backendEndpoint && outputs[currentPrompt.backendEndpoint] && (
+              <div className="bg-card backdrop-blur-xl border border-border rounded-2xl overflow-hidden shadow-2xl transition-all duration-300">
+                {/* Header */}
+                <div className="px-6 py-4 border-b border-border bg-violet-600/10 flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className="bg-violet-600 p-2 rounded-lg">
+                      <CheckCircle2 className="w-5 h-5 text-white" />
+                    </div>
+                    <div>
+                      <h3 className="font-bold text-lg text-text-primary">Generated Article</h3>
+                      <p className="text-xs text-text-tertiary">Automated Pipeline Output</p>
+                    </div>
+                  </div>
+                  {/* Stats Badge */}
+                  {/* TODO: If backend returns stats, display them here. Currently using placeholder logic or parsing valid info if available */}
+                </div>
+
+                {/* Content */}
+                <div className="p-6">
+                  <MarkdownOutput content={outputs[currentPrompt.backendEndpoint]} />
+                </div>
+              </div>
+            )}
+
+            {/* Standard View: Loop through selected models */}
+            {!currentPrompt?.backendEndpoint && selectedModels.map((modelId) => (
+              <div key={modelId} className="bg-card backdrop-blur-xl border border-border rounded-2xl overflow-hidden shadow-2xl transition-all duration-300">
+                {/* Card Header (Click to Toggle) */}
+                <div
+                  className="px-6 py-4 border-b border-border bg-secondary/30 flex items-center justify-between cursor-pointer hover:bg-secondary/50 transition-colors group"
+                  onClick={() => toggleCard(modelId)}
+                >
+                  <div className="flex items-center gap-3">
+                    <div className={`p-2 rounded-lg transition-all ${expandedCards[modelId] ? 'bg-accent/10 ring-1 ring-accent/50' : 'bg-input ring-1 ring-border'}`}>
+                      {expandedCards[modelId] ? (
+                        <ChevronDown className="w-4 h-4 text-accent" />
+                      ) : (
+                        <ChevronRight className="w-4 h-4 text-text-tertiary" />
+                      )}
+                    </div>
+                    <div>
+                      <h3 className="font-medium text-text-primary group-hover:text-accent transition-colors">
+                        {availableModels.find(m => m.id === modelId)?.name || modelId}
+                      </h3>
+                      <p className="text-xs text-text-tertiary">{modelId.split('/')[0]}</p>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-3">
+                    {/* METRICS */}
+                    {metrics[modelId] && (
+                      <div className="flex items-center gap-2 text-xs font-mono text-text-secondary">
+                        <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-secondary border border-border">
+                          <Clock className="w-3 h-3" />
+                          {metrics[modelId].time}s
+                        </div>
+                        <div className="px-3 py-1.5 rounded-full bg-secondary border border-border">
+                          {metrics[modelId].words} words
+                        </div>
+                        <div className={`px-3 py-1.5 rounded-full border ${metrics[modelId].attempts > 1 ? 'bg-yellow-500/10 border-yellow-500/20 text-yellow-500' : 'bg-secondary border-border'}`}>
+                          {metrics[modelId].attempts} iter
+                        </div>
+                      </div>
+                    )}
+
+                    {outputs[modelId] && (
+                      <>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            // Get raw text from output. If it's markdown, we copy the raw markdown.
+                            handleCopy(outputs[modelId], modelId);
+                          }}
+                          className={`p-2 rounded-lg transition-colors ${copyStatus[modelId] === 'copied'
+                            ? 'bg-success/10 text-success hover:bg-success/20'
+                            : 'bg-secondary text-text-tertiary hover:bg-accent/10 hover:text-accent'
+                            }`}
+                          title="Copy to Clipboard"
+                        >
+                          {copyStatus[modelId] === 'copied' ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+                        </button>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            saveOutput(modelId);
+                          }}
+                          className={`p-2 rounded-lg transition-colors ${saveStatus[modelId] === 'saved'
+                            ? 'bg-success/10 text-success hover:bg-success/20'
+                            : 'bg-secondary text-text-tertiary hover:bg-accent/10 hover:text-accent'
+                            }`}
+                          title="Save as Best Output"
+                        >
+                          {saveStatus[modelId] === 'saved' ? <CheckCircle2 className="w-4 h-4" /> : <Save className="w-4 h-4" />}
+                        </button>
+                      </>
+                    )}
+
+                    {/* Feedback Buttons */}
+                    <div className="w-[1px] h-6 bg-border mx-1 self-center" />
+
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleFeedback(modelId, 'like');
+                      }}
+                      className={`p-2 rounded-lg transition-colors ${feedbackMap[modelId] === 'like'
+                        ? 'bg-success/10 text-success'
+                        : 'bg-secondary text-text-tertiary hover:bg-success/10 hover:text-success'
+                        }`}
+                      title="Good Response"
+                    >
+                      <ThumbsUp className={`w-4 h-4 ${feedbackMap[modelId] === 'like' ? 'fill-current' : ''}`} />
+                    </button>
+
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleFeedback(modelId, 'dislike');
+                      }}
+                      className={`p-2 rounded-lg transition-colors ${feedbackMap[modelId] === 'dislike'
+                        ? 'bg-destructive/10 text-destructive'
+                        : 'bg-secondary text-text-tertiary hover:bg-destructive/10 hover:text-destructive'
+                        }`}
+                      title="Bad Response"
+                    >
+                      <ThumbsDown className={`w-4 h-4 ${feedbackMap[modelId] === 'dislike' ? 'fill-current' : ''}`} />
+                    </button>
+
+                  </div>
+                </div>
+
+                {/* Card Body */}
+                <div className={`transition-all duration-300 ease-in-out border-t border-border bg-card/50 ${expandedCards[modelId] ? 'max-h-[800px] opacity-100' : 'max-h-0 opacity-0 overflow-hidden'}`}>
+                  <div className="relative h-[400px]">
+                    {loading[modelId] ? (
+                      <div className="absolute inset-0 flex items-center justify-center space-y-4 flex-col">
+                        <Loader2 className="w-8 h-8 animate-spin text-accent" />
+                        <p className="text-sm font-medium text-text-secondary animate-pulse">Generating...</p>
+                      </div>
+                    ) : outputs[modelId] ? (
+                      <div className="h-full overflow-y-auto p-6 scroll-smooth">
+                        <MarkdownOutput content={outputs[modelId] || ''} />
+                      </div>
                     ) : (
-                      <ChevronRight className="w-4 h-4 text-text-tertiary" />
+                      <div className="absolute inset-0 flex items-center justify-center text-text-tertiary text-sm italic">
+                        Ready to run
+                      </div>
                     )}
                   </div>
-                  <div>
-                    <h3 className="font-medium text-text-primary group-hover:text-accent transition-colors">
-                      {availableModels.find(m => m.id === modelId)?.name || modelId}
-                    </h3>
-                    <p className="text-xs text-text-tertiary">{modelId.split('/')[0]}</p>
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-3">
-                  {/* METRICS */}
-                  {metrics[modelId] && (
-                    <div className="flex items-center gap-2 text-xs font-mono text-text-secondary">
-                      <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-secondary border border-border">
-                        <Clock className="w-3 h-3" />
-                        {metrics[modelId].time}s
-                      </div>
-                      <div className="px-3 py-1.5 rounded-full bg-secondary border border-border">
-                        {metrics[modelId].words} words
-                      </div>
-                      <div className={`px-3 py-1.5 rounded-full border ${metrics[modelId].attempts > 1 ? 'bg-yellow-500/10 border-yellow-500/20 text-yellow-500' : 'bg-secondary border-border'}`}>
-                        {metrics[modelId].attempts} iter
-                      </div>
-                    </div>
-                  )}
-
-                  {outputs[modelId] && (
-                    <>
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          // Get raw text from output. If it's markdown, we copy the raw markdown.
-                          handleCopy(outputs[modelId], modelId);
-                        }}
-                        className={`p-2 rounded-lg transition-colors ${copyStatus[modelId] === 'copied'
-                          ? 'bg-success/10 text-success hover:bg-success/20'
-                          : 'bg-secondary text-text-tertiary hover:bg-accent/10 hover:text-accent'
-                          }`}
-                        title="Copy to Clipboard"
-                      >
-                        {copyStatus[modelId] === 'copied' ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
-                      </button>
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          saveOutput(modelId);
-                        }}
-                        className={`p-2 rounded-lg transition-colors ${saveStatus[modelId] === 'saved'
-                          ? 'bg-success/10 text-success hover:bg-success/20'
-                          : 'bg-secondary text-text-tertiary hover:bg-accent/10 hover:text-accent'
-                          }`}
-                        title="Save as Best Output"
-                      >
-                        {saveStatus[modelId] === 'saved' ? <CheckCircle2 className="w-4 h-4" /> : <Save className="w-4 h-4" />}
-                      </button>
-                    </>
-                  )}
-
-                  {/* Feedback Buttons */}
-                  <div className="w-[1px] h-6 bg-border mx-1 self-center" />
-
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleFeedback(modelId, 'like');
-                    }}
-                    className={`p-2 rounded-lg transition-colors ${feedbackMap[modelId] === 'like'
-                      ? 'bg-success/10 text-success'
-                      : 'bg-secondary text-text-tertiary hover:bg-success/10 hover:text-success'
-                      }`}
-                    title="Good Response"
-                  >
-                    <ThumbsUp className={`w-4 h-4 ${feedbackMap[modelId] === 'like' ? 'fill-current' : ''}`} />
-                  </button>
-
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleFeedback(modelId, 'dislike');
-                    }}
-                    className={`p-2 rounded-lg transition-colors ${feedbackMap[modelId] === 'dislike'
-                      ? 'bg-destructive/10 text-destructive'
-                      : 'bg-secondary text-text-tertiary hover:bg-destructive/10 hover:text-destructive'
-                      }`}
-                    title="Bad Response"
-                  >
-                    <ThumbsDown className={`w-4 h-4 ${feedbackMap[modelId] === 'dislike' ? 'fill-current' : ''}`} />
-                  </button>
-
                 </div>
               </div>
-
-              {/* Card Body */}
-              <div className={`transition-all duration-300 ease-in-out border-t border-border bg-card/50 ${expandedCards[modelId] ? 'max-h-[800px] opacity-100' : 'max-h-0 opacity-0 overflow-hidden'}`}>
-                <div className="relative h-[400px]">
-                  {loading[modelId] ? (
-                    <div className="absolute inset-0 flex items-center justify-center space-y-4 flex-col">
-                      <Loader2 className="w-8 h-8 animate-spin text-accent" />
-                      <p className="text-sm font-medium text-text-secondary animate-pulse">Generating...</p>
-                    </div>
-                  ) : outputs[modelId] ? (
-                    <div className="h-full overflow-y-auto p-6 scroll-smooth">
-                      <MarkdownOutput content={outputs[modelId] || ''} />
-                    </div>
-                  ) : (
-                    <div className="absolute inset-0 flex items-center justify-center text-text-tertiary text-sm italic">
-                      Ready to run
-                    </div>
-                  )}
-                </div>
-              </div>
-            </div>
-          ))}
-        </div>
-      </main>
-    </div>
+            ))}
+          </div>
+        </main>
+      </div>
+    </ErrorBoundary>
   )
 }
 

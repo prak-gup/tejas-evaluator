@@ -2121,5 +2121,32 @@ Target शब्द = मूल शब्द × (compression_percent / 100)
 🔴 आउटपुट में शब्द संख्या न दिखाएं
 \`\`\`
 `
+  },
+  {
+    id: "pr-to-news-text",
+    name: "PR → News (Text Only)",
+    description: "New backend-powered pipeline for text-only PR conversion.",
+    backendEndpoint: "/api/v1/pr-to-news",
+    inputs: [
+      {
+        name: "text",
+        label: "Press Release Text",
+        type: "textarea",
+        placeholder: "Paste press release here...",
+      },
+      {
+        name: "target_words",
+        label: "Target Word Count",
+        type: "select",
+        defaultValue: "250",
+        options: [
+          { "value": "100", "label": "100" },
+          { "value": "250", "label": "250" },
+          { "value": "500", "label": "500" },
+          { "value": "800", "label": "800" }
+        ],
+      }
+    ],
+    template: ""
   }
 ];
